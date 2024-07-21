@@ -411,25 +411,17 @@ MiniIcons.get = function(category, name)
 
   -- Try cache first
   name = (category == 'file' or category == 'directory') and H.fs_basename(name) or name:lower()
-  local cached = H.cache[category][name]
-  if cached ~= nil then return cached[1], cached[2], cached[3] end
+  local cached = H.cache_get(category, name)
+  if cached ~= nil then return cached[1], cached[2], cached[3] == true end
 
-  -- Get icon
+  -- Get icon. Assume `nil` value to mean "fall back to category default".
   local icon, hl = getter(name)
-  local is_default = false
-  if icon == nil then
-    -- Fall back to category default
-    icon, hl = unpack(H.cache.default[category])
-    is_default = true
-  end
-  if hl == nil then
-    -- Normalize if icon is returned first time
+  if type(icon) == 'table' then
     icon, hl = H.style_icon(icon.glyph, name), icon.hl
   end
 
   -- Save to cache and return
-  H.cache[category][name] = { icon, hl, is_default }
-  return icon, hl, is_default
+  return H.cache_set(category, name, icon, hl)
 end
 
 --- List explicitly supported icon names
@@ -575,6 +567,19 @@ end
 -- Helper data ================================================================
 -- Module default config
 H.default_config = MiniIcons.config
+
+-- Cache tables organized to reduce memory footprint by reducing duplication
+-- - `cache` is nested and indexed by `category-name` pair with values being
+--   data number index in `cache_index`. Its purpose is to quickly get cache.
+-- - `cache_index` is nested and indexed by `category` with values being array
+--   of "icon-hl-is_default" unique tables. Its purpose is to store all unique
+--   return tuples per category. Index 0 is a category's "fallback" entry.
+-- - `cache_index_lookup` is nested and indexed by `category-hl-icon` with
+--   values being data number index in `cache_index`. Its purpose is to quickly
+--   add new "icon-hl" tuple to cache.
+H.cache = {}
+H.cache_index = {}
+H.cache_index_lookup = {}
 
 -- Default icons per supported category
 --stylua: ignore
@@ -1885,28 +1890,32 @@ H.create_default_hl = function()
   hi('MiniIconsYellow', { link = 'DiagnosticWarn' })
 end
 
+-- Cache ----------------------------------------------------------------------
 H.init_cache = function(config)
   -- NOTE: process 'filetype' - 'extension' - 'file' order because previous
   -- might be used to infer missing data in the next
   local categories = { 'directory', 'filetype', 'extension', 'file', 'lsp', 'os' }
 
-  -- Cache is structured the same way as customization tables in `config`, but
-  -- for smaller size (by about 10%) uses number indexes instead of named ones.
-  H.cache = { default = {} }
+  H.cache, H.cache_index, H.cache_index_lookup = { default = {} }, { default = {} }, { default = {} }
   for _, cat in ipairs(categories) do
-    -- Set default
-    H.cache.default[cat] = H.compute_cache_entry('default', cat, config.default[cat])
+    -- Set "default" category
+    local icon_def, hl_def = H.resolve_icon_data('default', cat, config.default[cat])
+    H.cache_set('default', cat, icon_def, hl_def)
 
     -- Set custom
-    H.cache[cat] = {}
+    H.cache[cat], H.cache_index[cat], H.cache_index_lookup[cat] = {}, {}, {}
+    -- - Ensure proper "fallback" entry at index 0
+    H.cache_index[cat][0] = { icon_def, hl_def, true }
     for name, icon_data in pairs(config[cat]) do
-      H.cache[cat][name] = H.compute_cache_entry(cat, name, icon_data)
+      local icon, hl = H.resolve_icon_data(cat, name, icon_data)
+      H.cache_set(cat, name, icon, hl)
     end
   end
-  H.cache.default.default = H.compute_cache_entry('default', 'default', config.default.default)
+  local icon_def_def, hl_def_def = H.resolve_icon_data('default', 'default', config.default.default)
+  H.cache_set('default', 'default', icon_def_def, hl_def_def)
 end
 
-H.compute_cache_entry = function(category, name, icon_data)
+H.resolve_icon_data = function(category, name, icon_data)
   if type(name) ~= 'string' then return nil end
 
   icon_data = type(icon_data) == 'table' and icon_data or {}
@@ -1922,11 +1931,35 @@ H.compute_cache_entry = function(category, name, icon_data)
       builtin_glyph, builtin_hl = MiniIcons.get(category, name)
     end
   end
-  return {
-    H.style_icon(has_glyph and glyph or builtin_glyph, name),
-    has_hl and hl or builtin_hl,
-    false,
-  }
+  return H.style_icon(has_glyph and glyph or builtin_glyph, name), has_hl and hl or builtin_hl
+end
+
+H.cache_get = function(cat, name) return H.cache_index[cat][H.cache[cat][name]] end
+
+H.cache_set = function(cat, name, icon, hl)
+  -- Process category fallback icon separatly
+  if icon == nil then
+    H.cache[cat][name] = 0
+    local t = H.cache_index[cat][0]
+    return t[1], t[2], true
+  end
+
+  -- Compute/ensure cache index
+  local index = (H.cache_index_lookup[cat][hl] or {})[icon]
+  if index == nil then
+    -- Add new unique 'icon-hl'
+    index = #H.cache_index[cat] + 1
+    H.cache_index[cat][index] = { icon, hl }
+
+    -- Add corresponding lookup entry
+    local hl_icons = H.cache_index_lookup[cat][hl] or {}
+    hl_icons[icon] = index
+    H.cache_index_lookup[cat][hl] = hl_icons
+  end
+
+  -- Add to cache and return result tuple
+  H.cache[cat][name] = index
+  return icon, hl, false
 end
 
 -- Getters --------------------------------------------------------------------
@@ -1951,14 +1984,11 @@ H.get_impl = {
     while dot ~= nil do
       local ext = name:sub(dot + 1):lower()
 
-      local cached = H.cache.extension[ext]
+      local cached = H.cache_get('extension', ext)
       if cached ~= nil then return cached[1], cached[2] end
 
       local icon, hl = H.get_from_extension(ext)
-      if icon ~= nil then
-        H.cache.extension[ext] = { icon, hl, false }
-        return icon, hl
-      end
+      if icon ~= nil then return H.cache_set('extension', ext, icon, hl) end
 
       dot = string.find(name, '%..', dot + 1)
     end
