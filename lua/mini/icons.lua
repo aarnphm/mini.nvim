@@ -1934,8 +1934,9 @@ H.get_impl = {
   default = function(name) H.error(vim.inspect(name) .. ' is not a supported category.') end,
   directory = function(name) return H.directory_icons[name] end,
   extension = function(name)
-    local icon, hl = H.get_from_extension(name)
-    if icon ~= nil then return icon, hl end
+    local icon_data = H.extension_icons[name]
+    if type(icon_data) == 'string' then return MiniIcons.get('filetype', icon_data) end
+    if icon_data ~= nil then return icon_data end
 
     -- Fall back to built-in filetype matching using generic filename
     local ft = H.filetype_match('aaa.' .. name)
@@ -1943,27 +1944,36 @@ H.get_impl = {
   end,
   file = function(name)
     local icon_data = H.file_icons[name]
+    if type(icon_data) == 'string' then return MiniIcons.get('filetype', icon_data) end
     if icon_data ~= nil then return icon_data end
 
-    -- Try using custom extensions first before for better speed (as
-    -- `vim.filetype.match()` is slow-ish to be called many times; like 0.1 ms)
+    -- Try using extensions first for better speed (as it is slow-ish to use
+    -- `vim.filetype.match()` many times; ~0.1ms each call)
     local dot = string.find(name, '%..', 2)
     while dot ~= nil do
       local ext = name:sub(dot + 1):lower()
 
-      local cached = H.cache.extension[ext]
-      if cached ~= nil then return cached[1], cached[2] end
-
-      local icon, hl = H.get_from_extension(ext)
-      if icon ~= nil then
-        H.cache.extension[ext] = { icon, hl, false }
-        return icon, hl
-      end
+      -- !!!!!!!!!!!!!!!!!!!!!!
+      -- TODO:
+      -- - Document change in resolution approach.
+      -- - This will block matches from `vim.filetype.match()` in case file
+      --   name or pattern contains recognizable extension:
+      --   - Exact file names like 'requirements.txt', 'CMakeLists.txt'.
+      --     Can be solved by manually tracking Neovim's built-in ones while
+      --     directing users to add those during `setup()`.
+      --   - Patterns containing extension, like for 'yaml.ansible' filetype
+      --     ('.*/roles/.*/tasks/.*%.ya?ml') or 'tilde' ('%.t%.html$').
+      --     This can be solved by adding `use_file_extension` callable config
+      --     entry (`function(ext, basename, name) return true end` as default)
+      --     for users to tweak this manually.
+      -- !!!!!!!!!!!!!!!!!!!!!!
+      local icon, hl, is_default = MiniIcons.get('extension', ext)
+      if not is_default then return icon, hl end
 
       dot = string.find(name, '%..', dot + 1)
     end
 
-    -- Fall back to built-in filetype matching using generic filename
+    -- Fall back to built-in filetype matching
     local ft = H.filetype_match(name)
     if ft ~= nil then return MiniIcons.get('filetype', ft) end
   end,
@@ -1971,12 +1981,6 @@ H.get_impl = {
   lsp = function(name) return H.lsp_icons[name] end,
   os = function(name) return H.os_icons[name] end,
 }
-
-H.get_from_extension = function(ext)
-  local icon_data = H.extension_icons[ext]
-  if type(icon_data) == 'string' then return MiniIcons.get('filetype', icon_data) end
-  if icon_data ~= nil then return H.style_icon(icon_data.glyph, ext), icon_data.hl end
-end
 
 H.style_icon = function(glyph, name)
   if MiniIcons.config.style ~= 'ascii' then return glyph end
