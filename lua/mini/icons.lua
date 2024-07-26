@@ -242,10 +242,13 @@ end
 --- resolution (see |MiniIcons.get()| for more details).
 --- Default: function which always returns `true` (i.e. consider all extensions).
 ---
---- Will be called for every extension found in input string (so be sure to make
---- it fast) with the arguments `ext` (found extension; as is) and `file` (input
---- for which icon is computed). Should explicitly return `true` if `ext` should
---- be considered (i.e. call `MiniIcons.get('extension', ext)` and use its output
+--- Will be called for every suffix after the dot found in input string (be sure
+--- to make it fast), until there is a recognized extension (may happen earlier
+--- if file name contains dots due to "extension" category own resolution).
+---
+--- The arguments will be `ext` (found extension; as is) and `file` (input for
+--- which icon is computed). Should explicitly return `true` if `ext` should be
+--- considered (i.e. call `MiniIcons.get('extension', ext)` and use its output
 --- if it is not default). Otherwise extension won't be even considered.
 ---
 --- The primary use case for this setting is to ensure that some extensions are
@@ -263,6 +266,9 @@ end
 ---   -- "scm" extension and completely rely on `vim.filetype.match()` fallback.
 ---   local ext_skip = { scm = true }
 ---   require('mini.icons').setup({
+---     -- NOTE: This assumes file name has no dots, as they result into compound
+---     -- extension which should also be taken into account. Use `vim.endswith()`
+---     -- for a more robust (but harder to expand) approach.
 ---     use_file_extension = function(ext, _) return not ext_skip[ext:lower()] end
 ---   })
 ---
@@ -351,6 +357,7 @@ MiniIcons.config = {
 ---     Icon data is attempted to be resolved in the following order:
 ---       - List of built-in and user configured extensions (for better
 ---         performance). Run `:=MiniIcons.list('extension')` to see them.
+---         They are used even if present as suffix of the input.
 ---       - Filetype as a result of |vim.filetype.match()| with placeholder
 ---         file name. Uses icon data from "filetype" category.
 ---
@@ -359,6 +366,7 @@ MiniIcons.config = {
 ---       -- All of these will result in the same output
 ---       MiniIcons.get('extension', 'lua')
 ---       MiniIcons.get('extension', 'LUA')
+---       MiniIcons.get('extension', 'my.lua')
 --- <
 ---   - `'file'` - icon data for file path.
 ---     Icon names:
@@ -371,6 +379,8 @@ MiniIcons.config = {
 ---       - List of built-in and user configured file names (matched to basename
 ---         of the input exactly). Run `:=MiniIcons.list('flle')` to see them.
 ---       - Basename extension(s) matched directly as `get('extension', ext)`.
+---         An extension is considered only if `config.use_file_extension` returned
+---         `true` with it as input.
 ---         Only recognizable extensions (i.e. not default fallback) are used.
 ---       - Filetype as a result of |vim.filetype.match()| with full input (not
 ---         basename) as `filename`. Uses icon data from "filetype" category.
@@ -1978,6 +1988,14 @@ H.get_impl = {
     local icon_data = H.extension_icons[name]
     if type(icon_data) == 'string' then return MiniIcons.get('filetype', icon_data) end
     if icon_data ~= nil then return icon_data, icon_data.hl end
+
+    -- Parts of complex extension (if can be recognized)
+    local dot = string.find(name, '%..')
+    while dot ~= nil do
+      local ext = name:sub(dot + 1)
+      if H.extension_icons[ext] or MiniIcons.config.extension[ext] then return MiniIcons.get('extension', ext) end
+      dot = string.find(name, '%..', dot + 1)
+    end
 
     -- Fall back to built-in filetype matching using generic filename
     local ft = H.filetype_match('aaa.' .. name)
